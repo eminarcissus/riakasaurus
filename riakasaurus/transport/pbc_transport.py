@@ -18,6 +18,7 @@ from riakasaurus.metadata import *
 from riakasaurus.riak_index_entry import RiakIndexEntry
 from riakasaurus.mapreduce import RiakLink
 from riakasaurus import exceptions
+from riakasaurus.transport.pbc import dt_codec
 
 # protobuf
 from riakasaurus.transport import transport, pbc
@@ -25,6 +26,12 @@ from riakasaurus.transport import transport, pbc
 LOGLEVEL_DEBUG = 1
 LOGLEVEL_TRANSPORT = 2
 LOGLEVEL_TRANSPORT_VERBOSE = 4
+
+from riakasaurus.datatypes import new
+from riakasaurus.datatypes import TYPES
+from riakasaurus.datatypes import Set,Map,Counter #top class crdt
+from riakasaurus.datatypes import Flag,Register #secondary class crdt
+
 
 
 class StatefulTransport(object):
@@ -90,7 +97,6 @@ class PBCTransport(transport.FeatureDetection):
     POOL_RETRY = 30
 
     def __init__(self, client):
-        self._prefix = client._prefix
         self.host = client._host
         self.port = client._port
         self.client = client
@@ -277,10 +283,11 @@ class PBCTransport(transport.FeatureDetection):
 
         # aquire transport, fire, release
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.put(robj.get_bucket().get_name(),
+            ret = yield transport.put(robj.get_bucket().name,
                                       robj.get_key(),
                                       payload,
                                       vclock,
+                                      bucket_type = robj.get_bucket().bucket_type,
                                       **kwargs
                                       )
         defer.returnValue(self.parseRpbGetResp(ret))
@@ -291,17 +298,18 @@ class PBCTransport(transport.FeatureDetection):
         # ***FIXME*** whats vtag for? ignored for now
 
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.get(robj.get_bucket().get_name(),
+            ret = yield transport.get(robj.get_bucket().name,
                                       robj.get_key(),
                                       r=r,
-                                      pr=pr)
+                                      pr=pr,
+                                      bucket_type = robj.get_bucket().bucket_type)
 
         defer.returnValue(self.parseRpbGetResp(ret))
 
     @defer.inlineCallbacks
     def head(self, robj, r=None, pr=None, vtag=None):
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.get(robj.get_bucket().get_name(),
+            ret = yield transport.get(robj.get_bucket().name,
                                       robj.get_key(),
                                       r=r,
                                       pr=pr,
@@ -324,10 +332,11 @@ class PBCTransport(transport.FeatureDetection):
             kwargs['vclock'] = robj.vclock()
 
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.delete(robj.get_bucket().get_name(),
-                                         robj.get_key(),
-                                         **kwargs
-                                         )
+            ret = yield transport.delete(robj.get_bucket().name,
+                                        robj.get_key(),
+                                        bucket_type = robj.get_bucket().bucket_type,
+                                        **kwargs
+                                        )
 
         defer.returnValue(ret)
 
@@ -397,9 +406,9 @@ class PBCTransport(transport.FeatureDetection):
         defer.returnValue(ret)
 
     @defer.inlineCallbacks
-    def get_buckets(self):
+    def get_buckets(self,bucket_type = 'default'):
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.getBuckets()
+            ret = yield transport.getBuckets(bucket_type)
         defer.returnValue([x for x in ret.buckets])
 
     @defer.inlineCallbacks
@@ -455,6 +464,94 @@ class PBCTransport(transport.FeatureDetection):
             defer.returnValue(ret)
 
 
+    @defer.inlineCallbacks
+    def fetch_datatype(self, bucket, key,r=None, pr=None,
+                       basic_quorum=None, notfound_ok=None, timeout=None,
+                       include_context=None):
+        """
+        fetch_datatype(bucket, key, r=None, pr=None, basic_quorum=None,
+                       notfound_ok=None, timeout=None, include_context=None)
+
+        Fetches the value of a Riak Datatype.
+
+        .. note:: This request is automatically retried :attr:`retries`
+           times if it fails due to network error.
+
+        :param bucket: the bucket of the datatype, which must belong to a
+          :class:`~riak.BucketType`
+        :type bucket: RiakBucket
+        :param key: the key of the datatype
+        :type key: string
+        :param r: the read quorum
+        :type r: integer, string, None
+        :param pr: the primary read quorum
+        :type pr: integer, string, None
+        :param basic_quorum: whether to use the "basic quorum" policy
+           for not-founds
+        :type basic_quorum: bool
+        :param notfound_ok: whether to treat not-found responses as successful
+        :type notfound_ok: bool
+        :param timeout: a timeout value in milliseconds
+        :type timeout: int
+        :param include_context: whether to return the opaque context
+          as well as the value, which is useful for removal operations
+          on sets and maps
+        :type include_context: bool
+        :rtype: a subclass of :class:`~riak.datatypes.Datatype`
+        """
+        datatype = yield bucket.get_property('datatype')
+        if not datatype:
+            raise Exception("Have to be a specific datatype to use datatype")
+        with (yield self._getFreeTransport()) as transport:
+            result = yield transport.fetch_datatype(bucket.name,key,
+                                              bucket.bucket_type,r=r,pr=pr,
+                                              basic_quorum=basic_quorum,
+                                              notfound_ok=notfound_ok,
+                                              timeout=timeout,
+                                              include_context=include_context)
+            if result.value:
+                result = dt_codec.decode_dtfetch_response(result,bucket,key)
+            else:
+                result = new(datatype,bucket,key)
+            defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def update_datatype(self, datatype, w=None, dw=None,
+                        pw=None, return_body=None, timeout=None,
+                        include_context=None,bucket_type = None):
+        """
+        Updates a Riak Datatype. This operation is not idempotent and
+        so will not be retried automatically.
+
+        :param datatype: the datatype to update
+        :type datatype: a subclass of :class:`~riak.datatypes.Datatype`
+        :param w: the write quorum
+        :type w: integer, string, None
+        :param dw: the durable write quorum
+        :type dw: integer, string, None
+        :param pw: the primary write quorum
+        :type pw: integer, string, None
+        :param timeout: a timeout value in milliseconds
+        :type timeout: int
+        :param include_context: whether to return the opaque context
+          as well as the value, which is useful for removal operations
+          on sets and maps
+        :type include_context: bool
+        :rtype: a subclass of :class:`~riak.datatypes.Datatype`, bool
+        """
+        with (yield self._getFreeTransport()) as transport:
+            result = yield transport.update_datatype(datatype,w=w,
+                                           dw=dw, pw=pw,
+                                           return_body=return_body,
+                                           timeout=timeout,
+                                           include_context=include_context)
+            defer.returnValue(result)
+            #if return_body and result:
+                #defer.returnValue( TYPES[result[0]](result[1], result[2]) )
+            #else:
+                #defer.returnValue( result )
+
+
 
     @defer.inlineCallbacks
     def set_bucket_props(self, bucket, props):
@@ -462,7 +559,7 @@ class PBCTransport(transport.FeatureDetection):
         Set bucket properties
         """
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.setBucketProperties(bucket.get_name(), **props)
+            ret = yield transport.setBucketProperties(bucket.name,bucket.bucket_type, **props)
         defer.returnValue(ret == True)
 
     @defer.inlineCallbacks
@@ -471,20 +568,32 @@ class PBCTransport(transport.FeatureDetection):
         get bucket properties
         """
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.getBucketProperties(bucket.get_name())
-        defer.returnValue({
-            'n_val': ret.props.n_val,
-            'allow_mult': ret.props.allow_mult
-        })
+            ret = yield transport.getBucketProperties(bucket.name,bucket.bucket_type)
+        res = {}
+        attrs = ['n_val', 'allow_mult','last_write_wins','precommit','has_precommit','postcommit','has_postcommit','chash_keyfun','linkfun','old_vclock','young_vclock','big_vclock','small_vclock','pr','r','w','pw','dw','rw','basic_quorum','notfound_ok','backend','search','repl','search_index','datatype']
+        if not attrs:
+            defer.returnValue(res)
+        for a in attrs:
+            if hasattr(ret.props,a):
+                res[a]=getattr(ret.props,a)
+        #print res
+        defer.returnValue(res)
+
+    @defer.inlineCallbacks
+    def reset_bucket_props(self,bucket):
+        with (yield self._getFreeTransport()) as transport:
+            ret = yield transport.reset_bucket_props(bucket)
+            defer.returnValue(ret)
+
 
     @defer.inlineCallbacks
     def get_keys(self, bucket):
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.getKeys(bucket.get_name())
+            ret = yield transport.getKeys(bucket.name,bucket.bucket_type)
         defer.returnValue(ret)
 
     @defer.inlineCallbacks
-    def get_index(self, bucket, index, startkey, endkey=None,return_terms=False, max_results=None, continuation=None):
+    def get_index(self, bucket, index, startkey, endkey=None,return_terms=False, max_results=None, continuation=None,bucket_type = 'default'):
         '''
         message RpbIndexResp {
             repeated bytes keys = 1;
@@ -492,10 +601,10 @@ class PBCTransport(transport.FeatureDetection):
             optional bytes continuation = 3;
             optional bool done = 4;
         }
-
+        return (results,continuation)
         '''
         with (yield self._getFreeTransport()) as transport:
-            ret = yield transport.get_index(bucket, index, startkey, endkey=endkey,return_terms=return_terms, max_results=max_results, continuation=continuation)
+            ret = yield transport.get_index(bucket, index, startkey, endkey=endkey,return_terms=return_terms, max_results=max_results, continuation=continuation,bucket_type=bucket_type)
             results = []
             if not return_terms or not endkey:
                 for resp in ret:
@@ -507,21 +616,78 @@ class PBCTransport(transport.FeatureDetection):
                         for pair in resp.results:
                             results.append((pair.key,pair.value))
             if max_results:
-                defer.returnValue((results,resp.continuation))
+                defer.returnValue(({'keys':results,'continuation':resp.continuation}))
             else:
-                defer.returnValue((results,None))
-                #TODO fixme here
-#                if return_terms and resp.results:
-                    #pass
-                    #results = [(decode_index_value(index, pair.key), pair.value)
-                               #for pair in resp.results]
-                #else:
-                    #results = resp.keys[:]
+                defer.returnValue(({'keys':results,continuation:None}))
 
-                #if max_results:
-                    #defer.returnValue ((results, resp.continuation))
-                #else:
-                    #defer.returnValue ((results, None))
+
+    @defer.inlineCallbacks
+    def create_search_index(self, index, schema=None, n_val=None):
+        if not (yield self.pb_search_admin()):
+            raise NotImplementedError("Yokozuna administration is not "
+                                      "supported for this version")
+        with (yield self._getFreeTransport()) as transport:
+            ret = yield transport.create_search_index(index, schema=schema, n_val=n_val)
+            defer.returnValue(ret)
+
+    @defer.inlineCallbacks
+    def get_search_index(self, index):
+        if not (yield self.pb_search_admin()):
+            raise NotImplementedError("Yokozuna administration is not "
+                                      "supported for this version")
+        with (yield self._getFreeTransport()) as transport:
+            ret = yield transport.get_search_index(index)
+            ret = self.decode_search_index(ret)
+            defer.returnValue(ret)
+
+
+    @defer.inlineCallbacks
+    def delete_search_index(self, index):
+        if not (yield self.pb_search_admin()):
+            raise NotImplementedError("Yokozuna administration is not "
+                                      "supported for this version")
+        with (yield self._getFreeTransport()) as transport:
+            ret = yield transport.delete_search_index(index)
+            defer.returnValue(True)
+
+    def decode_search_index(self,index):
+        ret = {}
+        for i in ['name','n_val','schema']:
+            ret[i] = getattr(index,i,'')
+        return ret
+
+    @defer.inlineCallbacks
+    def list_search_indexes(self):
+        if not (yield self.pb_search_admin()):
+            raise NotImplementedError("Yokozuna administration is not "
+                                      "supported for this version")
+        with (yield self._getFreeTransport()) as transport:
+            ret = yield transport.list_search_indexes()
+            ret = [self.decode_search_index(index) for index in ret.index]
+            defer.returnValue(ret)
+
+    @defer.inlineCallbacks
+    def create_search_schema(self, schema, content):
+        if not (yield self.pb_search_admin()):
+            raise NotImplementedError("Yokozuna administration is not "
+                                      "supported for this version")
+        with (yield self._getFreeTransport()) as transport:
+            ret = yield transport.create_search_schema(schema,content)
+            defer.returnValue(True)
+
+    @defer.inlineCallbacks
+    def get_search_schema(self, schema):
+        if not (yield self.pb_search_admin()):
+            raise NotImplementedError("Yokozuna administration is not "
+                                      "supported for this version")
+        with (yield self._getFreeTransport()) as transport:
+            resp = yield transport.get_search_schema(schema)
+            result = {}
+            result['name'] = resp.schema.name
+            result['content'] = resp.schema.content
+            defer.returnValue(result)
+
+
 
     def parseRpbSearchResp(self,res):
         '''

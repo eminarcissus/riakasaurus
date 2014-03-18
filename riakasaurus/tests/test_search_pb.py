@@ -54,7 +54,7 @@ class Tests(unittest.TestCase):
 
     @defer.inlineCallbacks
     def setUp(self):
-        self.client = riak.RiakClient(client_id=RIAK_CLIENT_ID)
+        self.client = riak.RiakClient(client_id=RIAK_CLIENT_ID,transport=transport.PBCTransport,port = 8087)
         self.bucket_name = BUCKET_PREFIX + self.id().rsplit('.', 1)[-1]
         self.bucket = self.client.bucket(self.bucket_name)
         s = yield self.client.list_search_indexes()
@@ -108,11 +108,11 @@ class Tests(unittest.TestCase):
         yield self.client.create_search_index('test_map_index')
         yield self.map_bucket.set_search_index('test_map_index')
 
-
     @defer.inlineCallbacks
     def tearDown(self):
         yield self.map_bucket.purge_keys()
         yield self.bucket.purge_keys()
+        yield self.client.transport.quit()
         #yield self.client.delete_search_index('test_index')
         #print 'Deleted index test_index' 
 
@@ -141,8 +141,8 @@ class Tests(unittest.TestCase):
         count = 20
         for i in xrange(count):
             obj1 = self.bucket.new("foo%d" %i, {"count": "%d" %(count-i)})
-            obj1.add_meta_data('yz-tags','x-riak-meta-class')
-            obj1.add_meta_data('class','test')
+            obj1.add_meta_data('x-riak-meta-yz-tags','x-riak-meta-class')
+            obj1.add_meta_data('x-riak-meta-class','test')
             yield obj1.store()
         yield sleep(1)
         keys = yield self.bucket.search('class:test',rows=1)
@@ -168,4 +168,80 @@ class Tests(unittest.TestCase):
         self.assertEqual(keys_sorted['num_found'],6)
         self.assertEqual(int(keys_sorted['docs'][0]['count_counter']),15)
 
+
+    #@defer.inlineCallbacks
+    #def test_solr_search_from_bucket(self):
+        #yield self.bucket.new("user", {"username": "roidrage"}).store()
+        #results = yield self.bucket.search("username:roidrage")
+        #self.assertEquals(1, len(results["docs"]))
+
+    #@defer.inlineCallbacks
+    #def test_solr_search_with_params_from_bucket(self):
+        #yield self.bucket.new("user", {"username": "roidrage"}).store()
+        #result = yield self.bucket.search("username:roidrage", wt="xml")
+
+        #self.assertEquals(1, len(result["docs"]))
+
+    #@defer.inlineCallbacks
+    #def test_solr_search_with_params(self):
+        #yield self.bucket.new("user", {"username": "roidrage"}).store()
+        #result = yield self.client.solr().search(self.bucket_name,
+                                                  #"username:roidrage",
+                                                  #wt="xml")
+
+        #self.assertEquals(1, len(result["docs"]))
+
+    #@defer.inlineCallbacks
+    #def test_solr_search(self):
+        #yield self.bucket.new("user", {"username": "roidrage"}).store()
+        #results = yield self.client.solr().search(self.bucket_name,
+                                                  #"username:roidrage")
+        #self.assertEquals(1, len(results["docs"]))
+
+    #@defer.inlineCallbacks
+    #def test_add_document_to_index(self):
+        #yield self.client.solr().add(self.bucket_name,
+                                     #{"id": "doc", "username": "tony"})
+        #results = yield self.client.solr().search(self.bucket_name,
+                                                  #"username:tony")
+
+        #self.assertEquals("tony",
+                          #results["docs"][0]["username"])
+
+#    @defer.inlineCallbacks
+    #def test_add_multiple_documents_to_index(self):
+        #yield self.client.solr().add(self.bucket_name,
+                                     #{"id": "dizzy", "username": "dizzy"},
+                                     #{"id": "russell", "username": "russell"})
+        #yield sleep(2)  # Eventual consistency is annoying
+        #results = yield self.client.solr().search(self.bucket_name,
+                                                  #"username:russell OR"
+                                                  #" username:dizzy")
+        #self.assertEquals(2, len(results["docs"]))
+
+    #@defer.inlineCallbacks
+    #def test_delete_documents_from_search_by_id(self):
+        #yield self.client.solr().add(self.bucket_name,
+                                     #{"id": "dizzy", "username": "dizzy"},
+                                     #{"id": "russell", "username": "russell"})
+        #yield self.client.solr().delete(self.bucket_name, docs=["dizzy"])
+        #results = yield self.client.solr().search(self.bucket_name,
+                                                  #"username:russell OR"
+                                                  #" username:dizzy")
+        ## This test fails at eventual consistency...
+        ##self.assertEquals(1, len(results["docs"]))
+
+    #@defer.inlineCallbacks
+    #def test_delete_documents_from_search_by_query(self):
+        #yield self.client.solr().add(self.bucket_name,
+                                     #{"id": "dizzy", "username": "dizzy"},
+                                     #{"id": "russell", "username": "russell"})
+        #yield self.client.solr().delete(self.bucket_name,
+                                        #queries=["username:dizzy",
+                                                 #"username:russell"])
+        #results = yield self.client.solr().search(self.bucket_name,
+                                                  #"username:russell OR"
+                                                  #" username:dizzy")
+        ## This test fails at eventual consistency...
+        ##self.assertEquals(0, len(results["docs"]))
 

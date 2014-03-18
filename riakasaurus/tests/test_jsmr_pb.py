@@ -14,6 +14,8 @@ from twisted.internet import defer
 VERBOSE = False
 
 from riakasaurus import riak
+from riakasaurus import transport
+
 
 # uncomment to activate logging
 # import sys
@@ -45,14 +47,16 @@ class Tests(unittest.TestCase):
 
     @defer.inlineCallbacks
     def setUp(self):
-        self.client = riak.RiakClient(client_id=RIAK_CLIENT_ID)
+        self.client = riak.RiakClient(client_id=RIAK_CLIENT_ID,transport=transport.PBCTransport,port=8087)
         self.bucket_name = BUCKET_PREFIX + self.id().rsplit('.', 1)[-1]
         self.bucket = self.client.bucket(self.bucket_name)
         yield self.bucket.purge_keys()
 
+
     @defer.inlineCallbacks
     def tearDown(self):
         yield self.bucket.purge_keys()
+        yield self.client.transport.quit()
 
     @defer.inlineCallbacks
     def test_javascript_source_map(self):
@@ -173,3 +177,4 @@ class Tests(unittest.TestCase):
         result = yield job.run()
         self.assertEqual(result, [10])
         log.msg('done javascript_arg_map_reduce')
+

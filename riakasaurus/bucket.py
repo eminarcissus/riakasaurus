@@ -21,6 +21,7 @@ from twisted.internet import defer
 
 from riakasaurus.riak_object import RiakObject
 from twisted.python import log
+from twisted.internet import defer,reactor
 
 import mimetypes
 
@@ -37,7 +38,7 @@ class RiakBucket(object):
     objects within the bucket.
     """
 
-    def __init__(self, client, name):
+    def __init__(self, client, name,bucket_type = 'default'):
         """
         Returns a new ``RiakBucket`` instance.
 
@@ -49,11 +50,14 @@ class RiakBucket(object):
         try:
             if isinstance(name, basestring):
                 name = name.encode('ascii')
+            if isinstance(bucket_type, basestring):
+                bucket_type = bucket_type.encode('ascii')
         except UnicodeError:
             raise TypeError('Unicode bucket names are not supported.')
 
         self._client = client
         self._name = name
+        self._bucket_type = bucket_type
         self._r = None
         self._w = None
         self._dw = None
@@ -67,6 +71,13 @@ class RiakBucket(object):
         """
         Get the bucket name as a string.
         """
+        return self._name
+    @property
+    def bucket_type(self):
+        return self._bucket_type
+
+    @property
+    def name(self):
         return self._name
 
     def get_r(self, r=None):
@@ -394,6 +405,24 @@ class RiakBucket(object):
         """
         return self.set_property('n_val', nval)
 
+    @defer.inlineCallbacks
+    def set_search_index(self,index,max_retry = 10):
+        try:
+            yield self.set_property('search_index',index)
+        except:
+            log.msg('Error set search index %s for %s ,retrying' %(index,self.name))
+            if max_retry > 0:
+                d = defer.Deferred()
+                d.addCallback(self.set_search_index,max_retry-1)
+                reactor.callLater(2,d.callback,index)
+                res = yield d
+                defer.returnValue(res)
+
+    @defer.inlineCallbacks
+    def get_search_index(self):
+        index = yield self.get_property('search_index')
+        defer.returnValue(index)
+
     def get_n_val(self):
         """
         Retrieve the N-value for this bucket.
@@ -554,34 +583,37 @@ class RiakBucket(object):
         defer.returnValue(pch)
 
     @defer.inlineCallbacks
-    def enable_search(self):
+    def enable_search(self,index_name = '',schema = ''):
         """
         Enable search for this bucket by installing the precommit hook to
         index objects in it.
         Returns deferred
+        default index will use the bucket name as index
+        default schema will use the default schema(dynamic) as index
         """
-        pch = yield self.get_property("search")
-        if not pch:
-            yield self.set_property("search",True)
-
+        current_index = yield self.get_search_index()
+        index_name = self.name if not index_name else index_name
+        current_index = yield self._client.get_search_index(index_name)
+        if not current_index:
+            if not schema:
+                yield self._client.create_search_index(index_name)
+            else:
+                yield self._client.create_search_index(index_name,schema)
+        if current_index != index_name:
+            yield self.set_search_index(index_name)
         defer.returnValue(True)
 
     @defer.inlineCallbacks
-    def disable_search(self):
-        """
-        Disable search for this bucket by removing the precommit hook to
-        index objects in it.
-        """
-        pch = yield self.get_property("search")
-        if pch:
-            yield self.set_property("search", False)
-        defer.returnValue(True)
-
     def search(self, query, **params):
         """
         Queries a search index over objects in this bucket/index.
         """
-        return self._client.solr().search(self._name, query, **params)
+        index = yield self.get_search_index()
+        if index:
+            res = yield self._client.solr().search(index, query, **params)
+            defer.returnValue(res)
+        else:
+            raise Exception("Current %s bucket haven't bind to a search index yet" %self.name)
 
     def get_index(self, index, startkey, endkey=None, return_terms=None,
                   max_results=None,continuation=None):
@@ -589,7 +621,7 @@ class RiakBucket(object):
         Queries a secondary index over objects in this bucket, returning keys.
         """
         return self._client.transport.get_index(
-            self._name, index, startkey, endkey,return_terms=return_terms,max_results=max_results,continuation=continuation)
+            self._name,index, startkey, endkey,return_terms=return_terms,max_results=max_results,continuation=continuation,bucket_type = self.bucket_type)
 
     def list_keys(self):
         """ Same as get_keys - for txRiak compat """
@@ -611,7 +643,6 @@ class RiakBucket(object):
 
         # Get the current key list
         keys = yield self.get_keys()
-
         # Major key-killing action
         if enable_parallel:
             for l in chunks(keys,parallel):
@@ -621,3 +652,76 @@ class RiakBucket(object):
             for key in keys:
                 obj = yield self.get_binary(key)
                 yield obj.delete()
+        yield self.reset_properties()
+
+    @defer.inlineCallbacks
+    def fetch_datatype(self,key,r=None, pr=None,
+                       basic_quorum=None, notfound_ok=None, timeout=None,
+                       include_context=None):
+        """
+        fetch_datatype(key, r=None, pr=None, basic_quorum=None,
+                       notfound_ok=None, timeout=None, include_context=None)
+
+        Fetches the value of a Riak Datatype.
+
+        .. note:: This request is automatically retried :attr:`retries`
+           times if it fails due to network error.
+
+        :param key: the key of the datatype
+        :type key: string
+        :param r: the read quorum
+        :type r: integer, string, None
+        :param pr: the primary read quorum
+        :type pr: integer, string, None
+        :param basic_quorum: whether to use the "basic quorum" policy
+           for not-founds
+        :type basic_quorum: bool
+        :param notfound_ok: whether to treat not-found responses as successful
+        :type notfound_ok: bool
+        :param timeout: a timeout value in milliseconds
+        :type timeout: int
+        :param include_context: whether to return the opaque context
+          as well as the value, which is useful for removal operations
+          on sets and maps
+        :type include_context: bool
+        :rtype: a subclass of :class:`~riak.datatypes.Datatype`
+        """
+        res = yield self._client.transport.fetch_datatype(self,key,r=r, pr=pr,
+                                          basic_quorum=basic_quorum,
+                                          notfound_ok=notfound_ok,
+                                          timeout=timeout,
+                                          include_context=include_context)
+        defer.returnValue(res)
+
+    @defer.inlineCallbacks
+    def update_datatype(self, datatype, w=None, dw=None,
+                        pw=None, return_body=None, timeout=None,
+                        include_context=None):
+        """
+        Updates a Riak Datatype. This operation is not idempotent and
+        so will not be retried automatically.
+
+        :param datatype: the datatype to update
+        :type datatype: a subclass of :class:`~riak.datatypes.Datatype`
+        :param w: the write quorum
+        :type w: integer, string, None
+        :param dw: the durable write quorum
+        :type dw: integer, string, None
+        :param pw: the primary write quorum
+        :type pw: integer, string, None
+        :param timeout: a timeout value in milliseconds
+        :type timeout: int
+        :param include_context: whether to return the opaque context
+          as well as the value, which is useful for removal operations
+          on sets and maps
+        :type include_context: bool
+        :rtype: a subclass of :class:`~riak.datatypes.Datatype`, bool
+        """
+        res = yield self._client.transport.update_datatype(datatype, w=w,
+                                           dw=dw, pw=pw,
+                                           return_body=return_body,
+                                           timeout=timeout,
+                                           include_context=include_context)
+                #defer.returnValue( TYPES[result[0]](result[1], result[2]) )
+        defer.returnValue(res)
+

@@ -15,6 +15,7 @@ from riakasaurus import mapreduce, bucket
 from riakasaurus.search import RiakSearch
 
 from riakasaurus import transport
+from twisted.python import log
 
 
 class RiakClient(object):
@@ -23,7 +24,7 @@ class RiakClient(object):
     Riak.
     """
     def __init__(self, host='127.0.0.1', port=8098,
-                prefix='riak', mapred_prefix='mapred',
+                mapred_prefix='mapred',
                 client_id=None, r_value="default", w_value="default",
                 dw_value="default", transport=transport.HTTPTransport,
                 request_timeout=None):
@@ -34,7 +35,6 @@ class RiakClient(object):
         """
         self._host = host
         self._port = port
-        self._prefix = prefix
         self._mapred_prefix = mapred_prefix
         if client_id:
             self._client_id = client_id
@@ -64,6 +64,61 @@ class RiakClient(object):
 
     def get_transport(self):
         return self.transport
+
+    def create_search_index(self, index, schema=None, n_val=None):
+        """
+        create_search_index(index, schema, n_val)
+
+        Create a search index of the given name, and optionally set
+        a schema. If no schema is set, the default will be used.
+
+        :param index: the name of the index to create
+        :type index: string
+        :param schema: the schema that this index will follow
+        :type schema: string, None
+        :param n_val: this indexes N value
+        :type n_val: integer, None
+        """
+        return self.transport.create_search_index(index, schema, n_val)
+
+    @defer.inlineCallbacks
+    def get_search_index(self, index):
+        """
+        Returns a yokozuna search index or None.
+        """
+        try:
+            res = yield self.transport.get_search_index(index)
+        except:
+            defer.returnValue( None )
+
+    def list_search_indexes(self):
+        """
+        Lists all yokozuna search indexes.
+        """
+        return self.transport.list_search_indexes()
+
+    def delete_search_index(self, index):
+        """
+        Deletes a yokozuna search index.
+        """
+        return self.transport.delete_search_index(index)
+
+    def create_search_schema(self, schema, content):
+        """
+        Creates a yokozuna search schema.
+        """
+        return self.transport.create_search_schema(schema,content)
+
+    @defer.inlineCallbacks
+    def get_search_schema(self, schema):
+        """
+        Returns a yokozuna search schema.
+        """
+        try:
+            res = yield self.transport.get_search_schema(schema)
+            defer.returnValue(res)
+        except:
+            defer.returnValue( None )
 
     def get_r(self):
         """
@@ -237,13 +292,13 @@ class RiakClient(object):
         self._decoders[content_type] = decoder
         return self
 
-    def bucket(self, name):
+    def bucket(self, name,bucket_type = 'default'):
         """
         Get the bucket by the specified name. Since buckets always exist,
         this will always return a RiakBucket.
         :returns: RiakBucket instance.
         """
-        return bucket.RiakBucket(self, name)
+        return bucket.RiakBucket(self, name,bucket_type)
 
     def is_alive(self):
         """
@@ -279,14 +334,14 @@ class RiakClient(object):
         mr = mapreduce.RiakMapReduce(self)
         return mr.link(*args)
 
-    def list_buckets(self):
+    def list_buckets(self,bucket_type = 'default'):
         """
         Retrieve a list of all buckets.
 
         :returns: list -- via deferred
         """
 
-        return self.transport.get_buckets()
+        return self.transport.get_buckets(bucket_type)
 
     def index(self, *args):
         """
@@ -383,6 +438,8 @@ class RiakClient(object):
         return self.transport.update_counter(bucket, key, value,
                                             w=w, dw=dw, pw=pw,
                                             returnvalue=returnvalue)
+
+
 
 
 if __name__ == "__main__":
